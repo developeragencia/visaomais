@@ -1,20 +1,37 @@
 import { Express, Request, Response } from "express";
-import { storage } from "../storage";
+import { 
+  getAppointmentsByUserId, 
+  getUpcomingAppointmentsByUserId, 
+  getAppointmentHistoryByUserId, 
+  createAppointment, 
+  updateAppointment, 
+  checkAppointmentAvailability,
+  getAppointment,
+  getAvailableTimeSlots
+} from "../storage";
+import { isAuthenticated } from "../middleware/auth";
+import { InsertAppointment } from "../types/appointments";
 
-// Middleware to check if user is authenticated
-const isAuthenticated = (req: Request, res: Response, next: Function) => {
-  if (req.isAuthenticated()) {
-    return next();
+// Estender o tipo Request do Express para incluir o usuário autenticado
+declare global {
+  namespace Express {
+    interface Request {
+      user: {
+        id: number;
+        email: string;
+        role: string;
+        franchiseId?: number;
+      };
+    }
   }
-  res.status(401).json({ message: "Não autorizado" });
-};
+}
 
 export function setupAppointmentsRoutes(app: Express) {
   // Get all appointments for the authenticated user
   app.get("/api/appointments", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = req.user.id;
-      const appointments = await storage.getAppointmentsByUserId(userId);
+      const appointments = await getAppointmentsByUserId(userId);
       res.json(appointments);
     } catch (error) {
       console.error("Error fetching appointments:", error);
@@ -26,7 +43,7 @@ export function setupAppointmentsRoutes(app: Express) {
   app.get("/api/appointments/upcoming", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = req.user.id;
-      const appointments = await storage.getUpcomingAppointmentsByUserId(userId);
+      const appointments = await getUpcomingAppointmentsByUserId(userId);
       res.json(appointments);
     } catch (error) {
       console.error("Error fetching upcoming appointments:", error);
@@ -38,7 +55,7 @@ export function setupAppointmentsRoutes(app: Express) {
   app.get("/api/appointments/history", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = req.user.id;
-      const appointments = await storage.getAppointmentHistoryByUserId(userId);
+      const appointments = await getAppointmentHistoryByUserId(userId);
       res.json(appointments);
     } catch (error) {
       console.error("Error fetching appointment history:", error);
@@ -50,7 +67,7 @@ export function setupAppointmentsRoutes(app: Express) {
   app.get("/api/appointments/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const appointmentId = parseInt(req.params.id);
-      const appointment = await storage.getAppointmentById(appointmentId);
+      const appointment = await getAppointment(appointmentId);
 
       if (!appointment) {
         return res.status(404).json({ message: "Consulta não encontrada" });
@@ -82,34 +99,33 @@ export function setupAppointmentsRoutes(app: Express) {
       }
 
       // Check if the time slot is available
-      const isAvailable = await storage.checkAppointmentAvailability(locationId, date, timeSlot);
+      const isAvailable = await checkAppointmentAvailability(parseInt(locationId), new Date(date), timeSlot);
       if (!isAvailable) {
         return res.status(409).json({ message: "Horário não disponível" });
       }
 
       // Create the appointment
-      const appointmentData = {
+      const appointmentData: InsertAppointment = {
         userId,
         franchiseId: parseInt(locationId),
         date: new Date(date),
         time: timeSlot,
         serviceType,
-        status: "scheduled",
-        createdAt: new Date(),
+        status: "scheduled"
       };
 
-      const appointment = await storage.createAppointment(appointmentData);
+      const appointment = await createAppointment(appointmentData);
       
       // Generate a confirmation code
       const confirmationCode = `AP${Math.floor(100000 + Math.random() * 900000)}`;
       
       // Update the appointment with the confirmation code
-      const updatedAppointment = await storage.updateAppointment(
-        appointment.id,
+      const updatedAppointment = await updateAppointment(
+        appointment[0].id,
         { confirmationCode, status: "confirmed" }
       );
 
-      res.status(201).json(updatedAppointment);
+      res.status(201).json(updatedAppointment[0]);
     } catch (error) {
       console.error("Error creating appointment:", error);
       res.status(500).json({ message: "Erro ao criar consulta" });
@@ -120,7 +136,7 @@ export function setupAppointmentsRoutes(app: Express) {
   app.put("/api/appointments/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const appointmentId = parseInt(req.params.id);
-      const appointment = await storage.getAppointmentById(appointmentId);
+      const appointment = await getAppointment(appointmentId);
 
       if (!appointment) {
         return res.status(404).json({ message: "Consulta não encontrada" });
@@ -133,7 +149,7 @@ export function setupAppointmentsRoutes(app: Express) {
 
       // If rescheduling, check if the new time slot is available
       if (req.body.date && req.body.time) {
-        const isAvailable = await storage.checkAppointmentAvailability(
+        const isAvailable = await checkAppointmentAvailability(
           appointment.franchiseId,
           new Date(req.body.date),
           req.body.time
@@ -145,12 +161,12 @@ export function setupAppointmentsRoutes(app: Express) {
       }
 
       // Update the appointment
-      const updatedAppointment = await storage.updateAppointment(
+      const updatedAppointment = await updateAppointment(
         appointmentId,
-        { ...req.body, updatedAt: new Date() }
+        { ...req.body }
       );
 
-      res.json(updatedAppointment);
+      res.json(updatedAppointment[0]);
     } catch (error) {
       console.error("Error updating appointment:", error);
       res.status(500).json({ message: "Erro ao atualizar consulta" });
@@ -161,7 +177,7 @@ export function setupAppointmentsRoutes(app: Express) {
   app.delete("/api/appointments/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const appointmentId = parseInt(req.params.id);
-      const appointment = await storage.getAppointmentById(appointmentId);
+      const appointment = await getAppointment(appointmentId);
 
       if (!appointment) {
         return res.status(404).json({ message: "Consulta não encontrada" });
@@ -173,7 +189,7 @@ export function setupAppointmentsRoutes(app: Express) {
       }
 
       // Instead of actually deleting, update the status to cancelled
-      await storage.updateAppointment(appointmentId, { status: "cancelled", updatedAt: new Date() });
+      await updateAppointment(appointmentId, { status: "cancelled" });
       
       res.status(204).send();
     } catch (error) {
@@ -185,7 +201,7 @@ export function setupAppointmentsRoutes(app: Express) {
   // Get available franchises/locations
   app.get("/api/franchises", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const franchises = await storage.getAllFranchises();
+      const franchises = await getActiveFranchises();
       res.json(franchises);
     } catch (error) {
       console.error("Error fetching franchises:", error);
@@ -199,7 +215,7 @@ export function setupAppointmentsRoutes(app: Express) {
       const franchiseId = parseInt(req.params.id);
       const date = req.query.date ? new Date(req.query.date as string) : new Date();
       
-      const availableSlots = await storage.getAvailableTimeSlots(franchiseId, date);
+      const availableSlots = await getAvailableTimeSlots(franchiseId, date);
       res.json(availableSlots);
     } catch (error) {
       console.error("Error fetching availability:", error);
